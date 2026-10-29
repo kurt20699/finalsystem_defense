@@ -20,6 +20,7 @@
     let roomCount = 0;
     let skippedBuildings = 0;
     let skippedRooms = 0;
+    let renamedRooms = 0;
 
     // ✅ Don't wipe existing buildings — that also destroys any admin-drawn
     // footprint/color data, since campus-data.js never had footprints to
@@ -42,6 +43,41 @@
                 WHERE short_name = $1`,
             [loc.shortName, loc.description || null, loc.photo || loc.image || null]
             );
+
+            // ✅ Rename rooms you changed in campus-data.js. A room is matched by its
+            // map coordinates: if the old name is gone from campus-data.js but a room in
+            // this building sits at the same spot as a room that has a new name, it is
+            // renamed in place (same id, floor, instructor, etc. are kept).
+            // Rooms are never added or deleted here, so rooms you added or removed in
+            // the Admin Dashboard stay as they are.
+            if (Array.isArray(loc.rooms)) {
+            const nameOf = (room) => (typeof room === "string" ? room : room.name);
+            const namesInFile = new Set(loc.rooms.map(nameOf));
+            const dbRooms = (await pool.query(
+                "SELECT id, name, lat, lng FROM rooms WHERE building = $1", [loc.shortName]
+            )).rows;
+            const dbNames = new Set(dbRooms.map(r => r.name));
+            const claimed = new Set();
+            for (const room of loc.rooms) {
+                if (typeof room === "string" || !room.coords) continue;   // no coordinates → can't tell it's a rename
+                if (dbNames.has(room.name)) continue;                     // name already in the DB
+                const [rLat, rLng] = room.coords;
+                const old = dbRooms.find(r =>
+                !claimed.has(r.id) && !namesInFile.has(r.name) &&         // old name no longer in campus-data.js
+                r.lat != null && r.lng != null &&
+                Math.abs(Number(r.lat) - rLat) < 1e-5 && Math.abs(Number(r.lng) - rLng) < 1e-5
+                );
+                if (!old) continue;
+                try {
+                await pool.query("UPDATE rooms SET name = $1 WHERE id = $2", [room.name, old.id]);
+                claimed.add(old.id);
+                renamedRooms++;
+                console.log(`✏️  ${loc.shortName}: renamed room "${old.name}" → "${room.name}"`);
+                } catch (err) {
+                console.warn(`⚠️  Could not rename "${old.name}" in "${loc.shortName}": ${err.message}`);
+                }
+            }
+            }
             continue;
         }
         const [lat, lng] = loc.coords || [null, null];
@@ -93,6 +129,7 @@
     }
 
     console.log(`\nSeeded ${buildingCount} buildings, ${roomCount} rooms.`);
+    if (renamedRooms) console.log(`Renamed ${renamedRooms} room(s) to match campus-data.js.`);
     if (skippedBuildings || skippedRooms) {
         console.log(`Skipped ${skippedBuildings} buildings, ${skippedRooms} rooms — see warnings above.`);
     }
