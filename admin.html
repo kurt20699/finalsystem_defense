@@ -3315,6 +3315,7 @@
   let footprintPickerMap = null;
   let footprintPoints = []; // [[lat,lng], ...]
   let footprintMarkers = [];
+  let footprintDragging = false; // true while a dot is being dragged (and briefly after)
 
   function toggleFootprintDrawer() {
     const container = document.getElementById('footprintMapPicker');
@@ -3361,6 +3362,7 @@
   });
 
     footprintPickerMap.on('click', (e) => {
+      if (footprintDragging) return; // releasing a dragged dot must not add a new point
       footprintPoints.push([e.lngLat.lat, e.lngLat.lng]);
       redrawFootprint();
     });
@@ -3370,29 +3372,55 @@
   function redrawFootprint() {
     if (!footprintPickerMap || !footprintPickerMap.isStyleLoaded()) return;
 
-    footprintMarkers.forEach(m => m.remove());
-    footprintMarkers = [];
+    // While a dot is being dragged the markers are kept as they are (rebuilding them
+    // would destroy the dot under your finger); only the shape preview is refreshed.
+    if (!footprintDragging) {
+      footprintMarkers.forEach(m => m.remove());
+      footprintMarkers = [];
 
-    footprintPoints.forEach((pt, i) => {
-      const el = document.createElement('div');
-      el.style.cssText = `
-          width: 10px;
-          height: 10px;
-          border-radius: 50%;
-          background: #2c5aa0;
-          cursor: pointer;
-      `;
-      el.addEventListener('click', (e) => {
-          e.stopPropagation(); // don't let this also register as a new-point click on the map
-          footprintPoints.splice(i, 1);
-          redrawFootprint();
+      footprintPoints.forEach((pt, i) => {
+        const el = document.createElement('div');
+        el.style.cssText = `
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #2c5aa0;
+            border: 2px solid #fff;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.45);
+            cursor: grab;
+            touch-action: none;
+        `;
+        let moved = false; // true when this press turned into a drag
+        el.addEventListener('click', (e) => {
+            e.stopPropagation(); // don't let this also register as a new-point click on the map
+            if (moved) { moved = false; return; } // it was a drag, not a tap: keep the point
+            footprintPoints.splice(i, 1);
+            redrawFootprint();
+        });
+
+        // Tap = remove the point. Hold and drag = move it.
+        const marker = new maplibregl.Marker({ element: el, draggable: true, clickTolerance: 4 })
+            .setLngLat([pt[1], pt[0]]) // pt is [lat, lng] — MapLibre wants [lng, lat]
+            .addTo(footprintPickerMap);
+        const savePosition = () => {
+            const { lat, lng } = marker.getLngLat();
+            footprintPoints[i] = [lat, lng];
+            redrawFootprint(); // refreshes the shape preview and status while markers stay put
+        };
+        marker.on('dragstart', () => {
+            footprintDragging = true;
+            moved = true;
+            el.style.cursor = 'grabbing';
+        });
+        marker.on('drag', savePosition);
+        marker.on('dragend', () => {
+            savePosition();
+            // keep the flag up briefly so the click that follows the release is ignored
+            setTimeout(() => { footprintDragging = false; moved = false; el.style.cursor = 'grab'; }, 350);
+        });
+        footprintMarkers.push(marker);
       });
-
-      const marker = new maplibregl.Marker({ element: el })
-          .setLngLat([pt[1], pt[0]]) // pt is [lat, lng] — MapLibre wants [lng, lat]
-          .addTo(footprintPickerMap);
-      footprintMarkers.push(marker);
-    });
+    }
 
     const polygonGeoJSON = { type: 'FeatureCollection', features: [] };
     if (footprintPoints.length >= 3) {
@@ -3431,7 +3459,7 @@
     statusEl.textContent =
       footprintPoints.length === 0 ? 'No footprint drawn yet.'
       : footprintPoints.length < 3 ? `${footprintPoints.length} point(s) placed — need at least 3 to form a shape.`
-      : `${footprintPoints.length}-point footprint drawn. Click a point to remove it.`;
+      : `${footprintPoints.length}-point footprint drawn. Tap a point to remove it, or hold and drag it to move it.`;
     statusEl.classList.toggle('set', footprintPoints.length >= 3);
 
     syncBuildingPickerFootprint(); // ← keep the location-picker map in sync
