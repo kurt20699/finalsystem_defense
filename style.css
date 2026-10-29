@@ -4424,3 +4424,39 @@ button,
     padding: 4px;
     cursor: pointer;
 }
+
+/* ── Login screen: steady on phones ── */
+
+/* 1. Inputs under 16px make phone browsers zoom in when you tap a field. */
+.auth-screen .auth-input,
+.auth-screen select.auth-input {
+    font-size: 16px;
+}
+
+@media (max-width: 768px) {
+    /* 2. The background glows and the pulse dot scale in and out forever,
+          which looks like the screen is zooming. Off on phones. */
+    .auth-screen .auth-bg::before,
+    .auth-screen .auth-bg::after,
+    .auth-screen .auth-bg-pulse {
+        animation: none;
+    }
+
+    /* 3. A blurred glass card over a moving background repaints every frame
+          on many phones and flickers. Use a solid card instead. */
+    .auth-screen .auth-card {
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+        background: #ffffff;
+    }
+}
+
+/* Login: no double-tap zoom, and no automatic text resizing */
+.auth-screen {
+    touch-action: manipulation;
+}
+
+html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+}

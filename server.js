@@ -464,6 +464,7 @@ async function sendBrevoEmail({ toEmail, toName, subject, textBody }) {
 
   const response = await fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
+    signal: AbortSignal.timeout(8000),   // don't let a slow email service hold up registration
     headers: {
       "Content-Type": "application/json",
       "api-key": apiKey

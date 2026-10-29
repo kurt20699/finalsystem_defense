@@ -1721,12 +1721,34 @@ function setupAuthHandlers() {
                 return;
             }
 
-            const response = await fetch('/api/auth/register', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, email, role, password, idDocument })
-            });
-            const result = await response.json();
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 90000);   // 90 s upload limit
+            const slowTimer = setTimeout(() => showNotification('Still connecting… the server may be waking up. Please wait up to a minute.', 'info'), 8000);
+            let response;
+            try {
+                response = await fetch('/api/auth/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, email, role, password, idDocument }),
+                    signal: controller.signal
+                });
+            } finally {
+                clearTimeout(timer);
+                clearTimeout(slowTimer);
+            }
+
+            const rawText = await response.text();
+            let result = null;
+            try { result = JSON.parse(rawText); } catch { /* not JSON: a host or proxy error page */ }
+
+            if (!result) {
+                console.error('Registration: non-JSON reply', response.status, rawText.slice(0, 200));
+                const reason = response.status === 413
+                    ? 'The ID photo is too large for the server. Please upload a smaller JPG or PNG.'
+                    : `The server sent an unexpected reply (HTTP ${response.status}). Please try again in a moment.`;
+                showNotification(reason, 'error');
+                return;
+            }
             if (!response.ok || !result?.ok) {
                 showNotification(result?.error || 'Registration failed. Please try again.', 'error');
                 return;
@@ -1753,7 +1775,13 @@ function setupAuthHandlers() {
             switchAuthTab('login');
         } catch (error) {
             console.error('Registration API error:', error);
-            showNotification('Unable to connect to server. Registration was not saved to database.', 'error');
+            if (error?.name === 'AbortError') {
+                showNotification('The upload took too long. Please try again on a stronger connection.', 'error');
+            } else if (error instanceof TypeError) {
+                showNotification('Unable to reach the server. Check your internet connection and try again.', 'error');
+            } else {
+                showNotification(`Registration failed: ${error?.message || 'unexpected error'}. Please try again.`, 'error');
+            }
         }
     });
 
@@ -9663,3 +9691,20 @@ document.addEventListener('DOMContentLoaded', () => {
         init();
     }
 });
+
+// Login screen: no browser zoom (focus auto-zoom, double-tap, pinch) while it is
+// showing. The normal viewport is restored as soon as the user logs in.
+(function lockZoomOnLogin() {
+    function init() {
+        const meta = document.querySelector('meta[name="viewport"]');
+        const auth = document.getElementById('authScreen');
+        if (!meta || !auth) return;
+        const normal = meta.getAttribute('content');
+        const locked = normal + ', maximum-scale=1, user-scalable=no';
+        const sync = () => meta.setAttribute('content', auth.classList.contains('hidden') ? normal : locked);
+        sync();
+        new MutationObserver(sync).observe(auth, { attributes: true, attributeFilter: ['class'] });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+    else init();
+})();
