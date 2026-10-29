@@ -41,7 +41,7 @@
 
     // Don't pop up over something the user is busy with.
     function somethingElseOpen() {
-        if (typeof map3dState !== 'undefined' && map3dState.active) return true;
+        // 3D map is fine — Route Details should still pop up there.
         if (document.getElementById('profilePanel')?.classList.contains('open')) return true;
         if (document.getElementById('locationModal')?.classList.contains('active')) return true;
         const addStop = document.getElementById('msAddStopModal');
