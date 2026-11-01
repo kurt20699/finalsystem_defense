@@ -394,7 +394,7 @@
         els.detailsName.textContent = person ? "Full name of the person you're visiting" : 'Details';
         els.detailsTag.textContent = required ? '(required)' : '(optional)';
         els.details.placeholder = person
-            ? 'Type their full name, e.g. Kurt Aries R. Almero'
+            ? 'Type their full name, e.g. Juan D. Cruz'
             : required
                 ? 'Please describe the purpose of your visit'
                 : 'e.g. Transcript of records for my son';
