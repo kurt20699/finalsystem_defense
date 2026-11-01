@@ -182,20 +182,7 @@
                     <form id="forgotStep1" class="auth-form">
                         <label class="auth-label" for="forgotEmail" id="forgotIdentifierLabel">Email</label>
                         <input id="forgotEmail" type="email" class="auth-input" placeholder="Enter your registered email" required>
-                        <!-- SMS DISABLED — Email is the only reset channel now -->
-                        <label class="auth-label">Send OTP via</label>
-                        <div class="forgot-method-row">
-                            <label class="forgot-method-option">
-                                <input type="radio" name="resetMethod" value="email" checked>
-                                <span>Email</span>
-                            </label>
-                            <!--
-                            <label class="forgot-method-option">
-                                <input type="radio" name="resetMethod" value="sms">
-                                <span>SMS</span>
-                            </label>
-                            -->
-                        </div>
+                        <!-- Email is the only reset channel — the code is always sent by email -->
                         <button type="submit" class="btn-primary auth-submit-btn">Send Reset Code</button>
                     </form>
     
