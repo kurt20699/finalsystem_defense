@@ -401,7 +401,7 @@ async function findPersonRooms(typedName) {
 // The sentence shown on the visitor's sidebar card.
 function personPlacesText(typedName, rooms) {
   if (!rooms.length) {
-    return `No room found for "${typedName}". Type the person's full name exactly (e.g. Kurt Aries R. Almero). Only the gates, clinic and canteens are shown.`;
+    return `No room found for "${typedName}". Type the person's full name exactly (e.g. Juan D. Cruz). Only the gates, clinic and canteens are shown.`;
   }
   return rooms.map(r => `${r.name} (${r.building})`).join(", ") + ` — ${rooms[0].instructor}`;
 }
