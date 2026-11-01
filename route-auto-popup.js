@@ -136,8 +136,12 @@
 
         // Keep the Arrived button in step with the panel. script.js only
         // re-checks it every 3 seconds, which made it lag behind the popup.
+        // Only when there's a next stop to go to — script.js hides the
+        // "Arrived — Go to Next Stop" button otherwise (msSyncArrivedButton).
         const arrived = document.getElementById('msArrivedSection');
-        if (arrived && near) arrived.style.display = 'block';
+        const hasNextStop = typeof msHasNextStop !== 'function' || msHasNextStop();
+        if (arrived && near && hasNextStop) arrived.style.display = 'block';
+        if (typeof msSyncArrivedButton === 'function') msSyncArrivedButton();
 
         // ── 25 m popup ──────────────────────────────────────────────
         // The banner stays up (with a live distance) while you're inside

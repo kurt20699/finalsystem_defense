@@ -4460,3 +4460,13 @@ html {
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
 }
+
+/* 📍 "Near … Building" line inside the "Your Location" popup */
+.user-near-line {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid #e4e9f0;
+    font-size: 12px;
+    font-weight: 700;
+    color: #1e5b7a;
+}

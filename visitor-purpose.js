@@ -124,13 +124,14 @@
         const info = describeDestination(dest);
         const campus = getCampus();
 
+        const extra = current?.matches || [];   // "Other (visit a specific person)" rooms
         if (info.type === 'room') {
             const building = campus?.locations.find(l => l.name === info.building || l.shortName === info.building)
                 || { name: info.building };
-            return P.canVisitorSeeRoom(purpose, building, info.name);
+            return P.canVisitorSeeRoom(purpose, building, info.name, extra);
         }
         const building = campus?.locations.find(l => l.id === dest.id || l.name === dest.name) || dest;
-        return P.canVisitorSeeBuilding(purpose, building);
+        return P.canVisitorSeeBuilding(purpose, building, extra);
     }
 
     // ── Let scoped data through the old building-type check ────
@@ -334,7 +335,7 @@
             </div>
             <div class="vp-spacer" id="vpSpacer"></div>
 
-            <label for="vpDetails">Details <span class="vp-tag" id="vpDetailsTag">(optional)</span></label>
+            <label for="vpDetails"><span id="vpDetailsName">Details</span> <span class="vp-tag" id="vpDetailsTag">(optional)</span></label>
             <textarea id="vpDetails" maxlength="200" placeholder="e.g. Transcript of records for my son"></textarea>
             <div class="vp-count"><span id="vpCount">0</span>/200</div>
 
@@ -372,6 +373,7 @@
         placesText: overlay.querySelector('#vpPlacesText'),
         spacer: overlay.querySelector('#vpSpacer'),
         details: overlay.querySelector('#vpDetails'),
+        detailsName: overlay.querySelector('#vpDetailsName'),
         detailsTag: overlay.querySelector('#vpDetailsTag'),
         count: overlay.querySelector('#vpCount'),
         error: overlay.querySelector('#vpError'),
@@ -388,10 +390,14 @@
     function refreshModalForSelection() {
         const p = selectedPurpose();
         const required = !!p?.requiresDetails;
+        const person = !!p?.findsPerson;
+        els.detailsName.textContent = person ? "Full name of the person you're visiting" : 'Details';
         els.detailsTag.textContent = required ? '(required)' : '(optional)';
-        els.details.placeholder = required
-            ? 'Please describe the purpose of your visit'
-            : 'e.g. Transcript of records for my son';
+        els.details.placeholder = person
+            ? 'Type their full name, e.g. Kurt Aries R. Almero'
+            : required
+                ? 'Please describe the purpose of your visit'
+                : 'e.g. Transcript of records for my son';
         els.placesText.textContent = p?.places || '';
         els.places.classList.toggle('show', !!p);
         els.spacer.style.display = p ? 'none' : '';
@@ -422,7 +428,9 @@
             return;
         }
         if (p.requiresDetails && !details) {
-            els.error.textContent = 'Please describe the purpose of your visit.';
+            els.error.textContent = p.findsPerson
+                ? "Please type the full name of the person you're visiting."
+                : 'Please describe the purpose of your visit.';
             els.details.focus();
             return;
         }
@@ -438,7 +446,10 @@
             });
             const data = await res.json();
             if (!res.ok || !data.ok) throw new Error(data.error || 'Could not save your purpose. Please try again.');
-            closeModal({ purpose: data.purpose, label: data.label, places: data.places, details: data.details });
+            if (p.findsPerson && !(data.matches || []).length) {
+                notify(`No room is assigned to "${details}". Check the spelling and type the person's full name.`, 'error');
+            }
+            closeModal({ purpose: data.purpose, label: data.label, places: data.places, details: data.details, matches: data.matches || [] });
         } catch (err) {
             els.error.textContent = err.message || 'Could not save your purpose. Please check your connection.';
         } finally {
@@ -558,7 +569,7 @@
                 }
                 if (data.ok) scheduleExpiry(data.expiresAt);
                 if (data.ok && data.purpose) {
-                    current = { purpose: data.purpose, label: data.label, places: data.places, details: data.details };
+                    current = { purpose: data.purpose, label: data.label, places: data.places, details: data.details, matches: data.matches || [] };
                 } else if (data.ok && data.finished) {
                     finished = true; // already completed today — exit-only map
                 }
@@ -665,7 +676,7 @@
         }
         const campus = getCampus();
         if (campus && typeof window.Permissions?.filterLocationsForPurpose === 'function') {
-            campus.locations = window.Permissions.filterLocationsForPurpose(campus.locations, current?.purpose || null);
+            campus.locations = window.Permissions.filterLocationsForPurpose(campus.locations, current?.purpose || null, current?.matches || []);
         }
         scopeApplied = true;
     }
@@ -674,7 +685,8 @@
         const result = await openModal('change');
         if (!result) return;
 
-        const changed = finished || result.purpose !== current?.purpose;
+        const changed = finished || result.purpose !== current?.purpose
+            || (result.details || '') !== (current?.details || '');   // e.g. a different person's name
         current = result;
         finished = false;
         checkedOut = false;

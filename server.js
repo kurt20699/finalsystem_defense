@@ -130,6 +130,20 @@ function formatRegistrationMessage({ name, userId, role, verificationLink }) {
   ].join("\n");
 }
 
+function formatRejectionMessage({ name, role }) {
+  return [
+    `Hello ${name},`,
+    "",
+    `Your ${role} account registration has been reviewed by the administrator and was not approved.`,
+    "This may be because the uploaded ID was unclear, did not match your details, or could not be verified.",
+    "",
+    "Account Status: Not Approved ❌",
+    "",
+    "If you think this is a mistake, please contact the campus admin office for assistance.",
+    "PRMSU Smart Campus Navigator Team"
+  ].join("\n");
+}
+
 function formatApprovalMessage({ name, role }) {
   return [
     `Hello ${name},`,
@@ -341,6 +355,57 @@ async function purgeOldVisitorIdPhotos() {
 }
 setTimeout(purgeOldVisitorIdPhotos, 10000);
 
+// ── 🧑‍🏫 "Other (visit a specific person)" ──────────────────────────────
+// Finds the rooms assigned to the person a Visitor typed. Teacher/staff
+// names come from campus-data.js; a name set for the room in the Admin
+// Dashboard (rooms.instructor) is used instead when there is one.
+let campusDataFile = {};
+try { campusDataFile = require("./campus-data.js"); } catch (err) {
+  console.warn("🧑‍🏫 Could not load campus-data.js for name matching:", err.message);
+}
+
+function roomsFromCampusDataFile() {
+  const list = [];
+  Object.values(campusDataFile || {}).forEach(campus => {
+    (campus?.locations || []).forEach(loc => {
+      (loc.rooms || []).forEach(room => {
+        if (room && typeof room === "object" && room.name && room.instructor) {
+          list.push({ building: loc.shortName, name: room.name, instructor: room.instructor });
+        }
+      });
+    });
+  });
+  return list;
+}
+
+// → [{ building, name, instructor }] for every room assigned to that exact name
+async function findPersonRooms(typedName) {
+  if (!Permissions.normalizePersonName(typedName)) return [];
+  const key = (b, n) => `${String(b).toLowerCase()}|${String(n).toLowerCase()}`;
+  const rooms = new Map();
+  roomsFromCampusDataFile().forEach(r => rooms.set(key(r.building, r.name), r));
+  try {
+    const db = await pool.query("SELECT building, name, instructor FROM rooms");
+    db.rows.forEach(r => {
+      const k = key(r.building, r.name);
+      const fromFile = rooms.get(k);
+      const instructor = (r.instructor && String(r.instructor).trim()) || fromFile?.instructor || null;
+      rooms.set(k, { building: r.building, name: r.name, instructor });
+    });
+  } catch (err) {
+    console.warn("🧑‍🏫 findPersonRooms: using campus-data.js only —", err.message);
+  }
+  return [...rooms.values()].filter(r => Permissions.personNameMatches(typedName, r.instructor));
+}
+
+// The sentence shown on the visitor's sidebar card.
+function personPlacesText(typedName, rooms) {
+  if (!rooms.length) {
+    return `No room found for "${typedName}". Type the person's full name exactly (e.g. Kurt Aries R. Almero). Only the gates, clinic and canteens are shown.`;
+  }
+  return rooms.map(r => `${r.name} (${r.building})`).join(", ") + ` — ${rooms[0].instructor}`;
+}
+
 // ── What the caller may see ──────────────────────────────────────────────
 // Students/Employees/Admins: building-type rules (same as before).
 // Visitors: only the places tied to TODAY's purpose of visit (Philippine
@@ -350,11 +415,12 @@ async function getCallerScope(req) {
   const userId = req.body?.userId || req.query?.userId;
   let role = Permissions.ROLES.VISITOR;
   let purpose = null;
+  let purposeDetails = null;
 
   if (userId) {
     try {
       const result = await pool.query(
-        `SELECT role, visit_purpose, visit_finished_at,
+        `SELECT role, visit_purpose, visit_purpose_details, visit_finished_at,
                 (visit_purpose_at AT TIME ZONE 'Asia/Manila')::date = (now() AT TIME ZONE 'Asia/Manila')::date AS purpose_is_today,
                 ${VISITOR_EXPIRED_SQL} AS access_expired
          FROM users WHERE LOWER(user_id) = LOWER($1)`,
@@ -369,6 +435,7 @@ async function getCallerScope(req) {
         // A finished visit ("Yes, I'm done") ends purpose-based access.
         if (result.rows[0].purpose_is_today && !result.rows[0].visit_finished_at) {
           purpose = result.rows[0].visit_purpose;
+          purposeDetails = result.rows[0].visit_purpose_details;
         }
       }
     } catch (err) {
@@ -397,11 +464,18 @@ async function getCallerScope(req) {
     });
   } catch { /* building-only rules still work */ }
 
+  // "Other (visit a specific person)": only the rooms of that exact name.
+  let extraRules = [];
+  if (Permissions.getVisitPurpose(purpose)?.findsPerson && purposeDetails) {
+    const found = await findPersonRooms(purposeDetails);
+    extraRules = Permissions.personRules(purposeDetails, found);
+  }
+
   return {
     role,
     purpose,
-    allowBuilding: (b) => Permissions.canVisitorSeeBuilding(purpose, { ...b, rooms: roomsByBuilding[b.short_name] || [] }),
-    allowRoom: (r) => Permissions.canVisitorSeeRoom(purpose, { short_name: r.building, type: r.building_type }, r.name)
+    allowBuilding: (b) => Permissions.canVisitorSeeBuilding(purpose, { ...b, rooms: roomsByBuilding[b.short_name] || [] }, extraRules),
+    allowRoom: (r) => Permissions.canVisitorSeeRoom(purpose, { short_name: r.building, type: r.building_type }, r.name, extraRules)
   };
 }
 
@@ -2271,7 +2345,39 @@ app.put("/api/admin/users/:userId/reject", requireAdmin, async (req, res) => {
       entityId: req.params.userId,
       details: {}
     });
-    return res.json({ ok: true, user: result.rows[0] });
+
+    // ✉️ Tell the user their registration was not approved — only reached
+    // after the verification_status update above has succeeded.
+    const rejectedUser = result.rows[0];
+    const rejectionSubject = "Your Account Registration Was Not Approved";
+    const rejectionMessage = formatRejectionMessage({
+      name: rejectedUser.full_name,
+      role: rejectedUser.role
+    });
+
+    try {
+      const emailResult = await sendBrevoEmail({
+        toEmail: rejectedUser.email,
+        toName: rejectedUser.full_name,
+        subject: rejectionSubject,
+        textBody: rejectionMessage
+      });
+      await logNotification({
+        userId: rejectedUser.user_id, channel: "email", recipient: rejectedUser.email,
+        subject: rejectionSubject, message: rejectionMessage,
+        status: emailResult.sent ? "sent" : "skipped",
+        context: "account_rejection"
+      });
+    } catch (error) {
+      await logNotification({
+        userId: rejectedUser.user_id, channel: "email", recipient: rejectedUser.email,
+        subject: rejectionSubject, message: rejectionMessage,
+        status: "failed", errorDetail: error.message,
+        context: "account_rejection"
+      });
+    }
+
+    return res.json({ ok: true, user: rejectedUser });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }
@@ -2839,11 +2945,19 @@ app.get("/api/visitor/purpose", async (req, res) => {
       return res.json({ ok: true, purpose: null, finished: true, expiresAt });
     }
     const p = Permissions.getVisitPurpose(row.visit_purpose);
+    let places = p?.places || "";
+    let matches = [];
+    if (p?.findsPerson && row.visit_purpose_details) {
+      const found = await findPersonRooms(row.visit_purpose_details);
+      places = personPlacesText(row.visit_purpose_details, found);
+      matches = Permissions.personRules(row.visit_purpose_details, found);
+    }
     return res.json({
       ok: true,
       purpose: row.visit_purpose,
       label: p?.label || row.visit_purpose,
-      places: p?.places || "",
+      places,
+      matches,
       details: row.visit_purpose_details || null,
       expiresAt
     });
@@ -2862,7 +2976,10 @@ app.post("/api/visitor/purpose", async (req, res) => {
 
   const cleanDetails = typeof details === "string" ? details.trim().slice(0, 200) : "";
   if (selected.requiresDetails && !cleanDetails) {
-    return res.status(400).json({ ok: false, error: "Please describe the purpose of your visit." });
+    return res.status(400).json({
+      ok: false,
+      error: selected.findsPerson ? "Please type the full name of the person you're visiting." : "Please describe the purpose of your visit."
+    });
   }
 
   try {
@@ -2882,7 +2999,14 @@ app.post("/api/visitor/purpose", async (req, res) => {
        WHERE LOWER(user_id) = LOWER($3)`,
       [selected.value, cleanDetails || null, userId]
     );
-    return res.json({ ok: true, purpose: selected.value, label: selected.label, places: selected.places, details: cleanDetails || null });
+    let places = selected.places;
+    let matches = [];
+    if (selected.findsPerson) {
+      const found = await findPersonRooms(cleanDetails);
+      places = personPlacesText(cleanDetails, found);
+      matches = Permissions.personRules(cleanDetails, found);
+    }
+    return res.json({ ok: true, purpose: selected.value, label: selected.label, places, matches, details: cleanDetails || null });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }

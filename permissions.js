@@ -139,11 +139,13 @@
             ]
         },
         {
-            value: 'other', label: 'Other (please specify)', requiresDetails: true,
-            places: 'Administration Building (please ask at the front office)',
-            destinations: [
-                { building: 'ADMIN BLDG.' }
-            ]
+            // The visitor types the FULL NAME of the person they are visiting.
+            // Only a room whose assigned teacher/staff name matches exactly
+            // (see personNameMatches below) is shown, with its building.
+            value: 'other', label: 'Other (visit a specific person)', requiresDetails: true,
+            findsPerson: true,
+            places: "The room of the person you're visiting (their full name must match exactly)",
+            destinations: []
         }
     ]);
 
@@ -292,11 +294,49 @@
 
     // Rules in effect for a purpose: the always-visible places + the
     // purpose's own destinations. No/unknown purpose = always-visible only.
-    function getPurposeRules(purpose) {
+    // extraRules: the rooms found for "Other (visit a specific person)",
+    // as [{ building: 'SHORT NAME', rooms: ['Room', …] }, …].
+    function getPurposeRules(purpose, extraRules) {
         const rules = VISITOR_ALWAYS_VISIBLE.map(building => ({ building }));
         const p = getVisitPurpose(purpose);
         if (p) rules.push(...p.destinations);
+        if (p?.findsPerson && Array.isArray(extraRules)) rules.push(...extraRules);
         return rules;
+    }
+
+    // ── "Other (visit a specific person)" — exact name matching ─────────
+    // The typed name must be the person's WHOLE name. Only these small
+    // differences are ignored: upper/lower case, extra spaces, periods, and a
+    // leading title (Mr., Ms., Dr., Engr., Prof., Sir, …).
+    //   "Kurt Aries R. Almero"      → matches "Mr. Kurt Aries R. Almero"
+    //   "kurt aries r almero"       → matches
+    //   "Kurt" / "Almero"           → no match
+    const PERSON_TITLE_RE = /^(?:mr|mrs|ms|miss|mx|dr|engr|prof|atty|arch|sir|ma'?am|madam)\.?\s+/;
+
+    function normalizePersonName(value) {
+        let s = normalizeName(value).replace(/\./g, ' ').replace(/\s+/g, ' ').trim();
+        // Strip leading titles (also handles "Dr. Engr. …").
+        let prev;
+        do { prev = s; s = s.replace(PERSON_TITLE_RE, ''); } while (s !== prev);
+        return s;
+    }
+
+    function personNameMatches(typed, assigned) {
+        const a = normalizePersonName(typed);
+        return !!a && a === normalizePersonName(assigned);
+    }
+
+    // rooms: [{ building: 'SHORT NAME', name: 'Room', instructor: 'Mr. …' }, …]
+    // Returns the matching rooms grouped as purpose rules.
+    function personRules(typedName, rooms) {
+        const byBuilding = new Map();
+        (rooms || []).forEach(r => {
+            if (!r || !r.building || !r.name || !personNameMatches(typedName, r.instructor)) return;
+            if (!byBuilding.has(r.building)) byBuilding.set(r.building, []);
+            const list = byBuilding.get(r.building);
+            if (!list.includes(r.name)) list.push(r.name);
+        });
+        return [...byBuilding].map(([building, list]) => ({ building, rooms: list }));
     }
 
     function ruleMatchesBuilding(rule, building) {
@@ -321,8 +361,8 @@
     }
 
     /** Can a Visitor with this purpose see/navigate to this building? */
-    function canVisitorSeeBuilding(purpose, building) {
-        return getPurposeRules(purpose).some(rule => {
+    function canVisitorSeeBuilding(purpose, building, extraRules) {
+        return getPurposeRules(purpose, extraRules).some(rule => {
             if (!ruleMatchesBuilding(rule, building)) return false;
             // A type-wide rule (e.g. all departments) only reveals a building
             // that actually has a matching room, e.g. a Dean's Office.
@@ -334,8 +374,8 @@
     }
 
     /** Can a Visitor with this purpose see/navigate to this room of this building? */
-    function canVisitorSeeRoom(purpose, building, roomName) {
-        return getPurposeRules(purpose).some(rule =>
+    function canVisitorSeeRoom(purpose, building, roomName, extraRules) {
+        return getPurposeRules(purpose, extraRules).some(rule =>
             ruleMatchesBuilding(rule, building) && ruleAllowsRoom(rule, roomName)
         );
     }
@@ -344,14 +384,14 @@
      * Returns a copy of campusData `locations` containing only the buildings
      * and rooms a Visitor with this purpose may see. Does not mutate input.
      */
-    function filterLocationsForPurpose(locations, purpose) {
+    function filterLocationsForPurpose(locations, purpose, extraRules) {
         if (!Array.isArray(locations)) return [];
         return locations
-            .filter(loc => canVisitorSeeBuilding(purpose, loc))
+            .filter(loc => canVisitorSeeBuilding(purpose, loc, extraRules))
             .map(loc => ({
                 ...loc,
                 rooms: Array.isArray(loc.rooms)
-                    ? loc.rooms.filter(r => canVisitorSeeRoom(purpose, loc, typeof r === 'string' ? r : r?.name))
+                    ? loc.rooms.filter(r => canVisitorSeeRoom(purpose, loc, typeof r === 'string' ? r : r?.name, extraRules))
                     : loc.rooms
             }));
     }
@@ -374,6 +414,9 @@
         getVisitPurpose,
         canVisitorSeeBuilding,
         canVisitorSeeRoom,
-        filterLocationsForPurpose
+        filterLocationsForPurpose,
+        normalizePersonName,
+        personNameMatches,
+        personRules
     };
 });

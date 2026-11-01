@@ -515,12 +515,16 @@ function updateUserLocationMarker(lat, lng, accuracy, options = {}) {
     }
 
     if (showPopup) {
-        const popup = new maplibregl.Popup({ offset: 20 }).setHTML(`
-            <div style="text-align: center;">
-                <strong>📍 Your Location</strong><br>
-                ${typeof accuracy === 'number' ? `<small>Accuracy: ±${Math.round(accuracy)}m</small>` : ''}
-            </div>
-        `);
+        const box = document.createElement('div');
+        box.style.textAlign = 'center';
+        box.innerHTML = `
+            <strong>📍 Your Location</strong><br>
+            ${typeof accuracy === 'number' ? `<small>Accuracy: ±${Math.round(accuracy)}m</small>` : ''}
+            <div class="user-near-line" style="display:none;"></div>
+        `;
+        // 📍 "Near … Building" line — filled and kept up to date by updateNearestBuildingLabel()
+        state.userNearLineEl = box.querySelector('.user-near-line');
+        const popup = new maplibregl.Popup({ offset: 20 }).setDOMContent(box);
         state.userMarker.setPopup(popup);
         openMarkerPopup(state.userMarker);
     }
@@ -540,6 +544,86 @@ function updateUserLocationMarker(lat, lng, accuracy, options = {}) {
     if (map3dState.map) {
         sync3DUserLocationMarker(lat, lng);
     }
+
+    updateNearestBuildingLabel(lat, lng);   // 📍 "Near … Building" (Visitors)
+}
+
+// ── 📍 "Near … Building" label under the blue dot (Visitors) ──
+// Visitors only see the places tied to their purpose, so they may not know
+// where they are. This names the closest campus building, even one that is
+// hidden from their map. The building list is the untouched campus-data.js
+// copy (STATIC_CAMPUS_LOCATIONS), taken before the Visitor trimming.
+const NEAR_LABEL_MAX_M = 150;     // farther than this from every building → no label
+const NEAR_LABEL_SWITCH_M = 3;    // a new building must be this much closer (stops flicker)
+let nearLabelLoc = null;          // building currently named
+let nearLabelText = null;         // its text, reused when the 3D marker is (re)created
+
+function nearLabelEnabled() {
+    const role = getAuthSession()?.role;
+    if (typeof window.Permissions?.canUseFeature === 'function') {
+        return window.Permissions.canUseFeature(role, 'requireVisitPurpose');
+    }
+    return String(role || '').toUpperCase() === 'VISITOR';
+}
+
+function nearestCampusBuilding(lat, lng) {
+    let best = null;
+    for (const loc of STATIC_CAMPUS_LOCATIONS) {
+        const c = loc.coords;
+        if (!Array.isArray(c) || !Number.isFinite(c[0]) || !Number.isFinite(c[1])) continue;
+        const d = calculateDistance([lat, lng], c);
+        if (!best || d < best.d) best = { loc, d };
+    }
+    return best;
+}
+
+// "CCIT" + "Computing and Technology Building" → "Near CCIT Building"
+function nearLabelFor(loc) {
+    const short = String(loc.shortName || loc.name || '').trim();
+    const addBuilding = /building/i.test(loc.name || '') && !/building|bldg/i.test(short);
+    return `Near ${short}${addBuilding ? ' Building' : ''}`;
+}
+
+// Shows the text as a line inside the white "Your Location" popup.
+// The popup keeps the same content box when it's closed and reopened,
+// so the line stays current even while the popup is closed.
+function setNearLabel(text) {
+    const line = state.userNearLineEl;
+    if (!line) return;
+    line.style.display = text ? '' : 'none';
+    if (line.textContent !== (text || '')) line.textContent = text || '';
+}
+
+function updateNearestBuildingLabel(lat, lng) {
+    const previousLoc = nearLabelLoc;
+    nearLabelText = null;
+    if (nearLabelEnabled() && Number.isFinite(lat) && Number.isFinite(lng)) {
+        let best = nearestCampusBuilding(lat, lng);
+        if (best && best.d <= NEAR_LABEL_MAX_M) {
+            // Keep the current building unless the new one is clearly closer.
+            if (nearLabelLoc && nearLabelLoc !== best.loc) {
+                const curD = calculateDistance([lat, lng], nearLabelLoc.coords);
+                if (curD <= NEAR_LABEL_MAX_M && curD - best.d < NEAR_LABEL_SWITCH_M) best = { loc: nearLabelLoc, d: curD };
+            }
+            nearLabelLoc = best.loc;
+            nearLabelText = nearLabelFor(best.loc);
+        } else {
+            nearLabelLoc = null;
+        }
+    } else {
+        nearLabelLoc = null;
+    }
+    setNearLabel(nearLabelText);
+
+    // Nearest building changed → bring the "Your Location" popup back if the
+    // user had closed it. It stays closed while the building stays the same.
+    if (nearLabelLoc && nearLabelLoc !== previousLoc) reopenUserLocationPopup();
+}
+
+function reopenUserLocationPopup() {
+    const popup = state.userMarker?.getPopup();
+    if (!popup || popup.isOpen() || !state.userNearLineEl) return;
+    openMarkerPopup(state.userMarker);
 }
 
 // Removes the user marker + accuracy circle layer/source cleanly.
@@ -4526,6 +4610,7 @@ function loadOsmBuildingOutlines() {
         // Only trust a saved copy that actually has buildings in it.
         if (saved && Date.now() - saved.savedAt < OSM_OUTLINES_TTL_MS && Array.isArray(saved.rings) && saved.rings.length) {
             osmOutlines = saved.rings;
+            setTimeout(syncUnderConstructionLayers, 0);   // draw the stripes right away
             return null;
         }
         localStorage.removeItem(OSM_OUTLINES_KEY);
@@ -6764,6 +6849,7 @@ function msInit() {
     document.getElementById('msArrivedSection').style.display = 'none';
     document.getElementById('msOfflineBanner').style.display = 'none';
     document.getElementById('msCountdownBanner').style.display = 'none';
+    msSyncAddStopButton();   // new trip → "Add Next Stop" is available again
 }
 
 // Normalizes ANY location object — a raw campusData building, a raw room
@@ -6838,7 +6924,18 @@ function msActivate(destination) {
     msStartArrivalCheck(destination);
 }
 
+// ✅ Hide "➕ Add Next Stop" once the trip already has the maximum number of
+// stops (MS_MAX_STOPS = 3); it comes back if a stop is removed or a new trip starts.
+function msSyncAddStopButton() {
+    const btn = document.getElementById('msAddStopBtn');
+    const wrap = btn?.parentElement;           // the padded row around the button
+    if (!wrap) return;
+    const full = (state.multiStop?.stops?.length || 0) >= MS_MAX_STOPS;
+    wrap.style.display = full ? 'none' : '';
+}
+
 function msRenderProgress() {
+    msSyncAddStopButton();
     const ms = state.multiStop;
     if (!ms.active || ms.stops.length === 0) {
         document.getElementById('msProgressBar').style.display = 'none';
@@ -6853,6 +6950,7 @@ function msRenderProgress() {
     // Update counter
     document.getElementById('msStopCount').textContent =
         `Stop ${current + 1} of ${total}`;
+    msSyncArrivedButton();   // a stop was added/removed/reached → re-check the button
 
     // Build step indicator (dots connected by lines)
     const indicator = document.getElementById('msStepIndicator');
@@ -7013,15 +7111,23 @@ async function msJumpToStop(index) {
     const target = ms.stops[index];
     if (!target || index === ms.currentIndex) return;
 
+    if (target.status === 'done') return;      // already visited
+
     msClearArrivalCheck();
 
-    const prevCurrent = ms.stops[ms.currentIndex];
-    if (prevCurrent && prevCurrent.status === 'current') {
-        prevCurrent.status = 'pending'; // demoted, not skipped — still in the list
-    }
+    // Re-order the trip so the chosen stop comes FIRST, the stops after it
+    // keep their order, and the stops you skipped over move to the END.
+    //   CIT → Admin → Cafeteria, tap Admin  ⇒  Admin → Cafeteria → CIT
+    // "Next stop", "Stop X of Y" and the Arrived button all follow this new
+    // order. Stops already reached stay at the front, marked done.
+    const done = ms.stops.filter(s => s.status === 'done');
+    const remaining = ms.stops.filter(s => s.status !== 'done');
+    const k = remaining.indexOf(target);
+    const reordered = [...remaining.slice(k), ...remaining.slice(0, k)];
+    reordered.forEach((stop, i) => { stop.status = i === 0 ? 'current' : 'pending'; });
 
-    target.status = 'current';
-    ms.currentIndex = index;
+    ms.stops = [...done, ...reordered];
+    ms.currentIndex = done.length;
 
     state.selectedLocation = target.location;
     state._routeRecordedThisNav = false;
@@ -7362,8 +7468,33 @@ async function msRemoveStop(index) {
     await msReorderByDistance();
 }
 
+// ✅ "Arrived — Go to Next Stop" only makes sense when there IS a next stop:
+// hidden for a single destination, and at the last stop of a multi-stop trip.
+function msHasNextStop() {
+    const ms = state.multiStop;
+    return !!ms && Array.isArray(ms.stops) && ms.stops.length > 1 && ms.currentIndex < ms.stops.length - 1;
+}
+
+// Shows/hides the button for the current stop. Safe to call any time.
+function msSyncArrivedButton() {
+    const btn = document.getElementById('msArrivedBtn');
+    const hasNext = msHasNextStop();
+    if (btn) btn.style.display = hasNext ? 'flex' : 'none';
+    // Without the button, don't leave an empty strip — the section stays
+    // only while the "Almost there" or "You have arrived" banner is showing.
+    const section = document.getElementById('msArrivedSection');
+    if (section && !hasNext) {
+        const showing = id => {
+            const el = document.getElementById(id);
+            return !!(el && el.style.display && el.style.display !== 'none');
+        };
+        if (!showing('msNearBanner') && !showing('msCountdownBanner')) section.style.display = 'none';
+    }
+}
+
 function msStartArrivalCheck(destination) {
     msClearArrivalCheck();
+    msSyncArrivedButton();
 
     const destCoords = normalizeCoords(destination.coords);
     if (!destCoords) return;
@@ -7388,6 +7519,7 @@ function msStartArrivalCheck(destination) {
             const left = window.RouteProgress?.remainingMeters(lat, lng, state.currentRoute?.coordinates);
             const near = left && !left.offRoute ? left.remaining <= ARRIVAL_NEAR_RADIUS_M : result.near;
             arrivedSection.style.display = near ? 'block' : 'none';
+            msSyncArrivedButton();
         }
 
         positiveChecks = result.arrived ? positiveChecks + 1 : 0;
@@ -7410,24 +7542,42 @@ function msClearArrivalCheck() {
     }
 }
 
+// Last (or only) stop: how long the "You have arrived" banner waits before
+// the trip ends, so there's still time to tap "➕ Add Next Stop".
+const MS_FINAL_GRACE_S = 15;
+
+function msAddStopIsOpen() {
+    const modal = document.getElementById('msAddStopModal');
+    const addStopOpen = !!(modal && modal.style.display && modal.style.display !== 'none');
+    return addStopOpen || !!document.getElementById('locationModal')?.classList.contains('active');
+}
+
 function msStartCountdown() {
-    let seconds = 5;
     const banner = document.getElementById('msCountdownBanner');
     const arrivedSection = document.getElementById('msArrivedSection');
 
     if (!banner) return;
 
+    // Between stops: 5 s, then switch to the next stop.
+    // Last/only stop: a longer pause. Adding a stop during it turns this into
+    // a normal "Switching to …" countdown and shows the Arrived button.
+    let seconds = msHasNextStop() ? 5 : MS_FINAL_GRACE_S;
+
     arrivedSection.style.display = 'block';
     banner.style.display = 'block';
 
-    const nextStop = state.multiStop.stops[state.multiStop.currentIndex + 1];
-    const nextName = nextStop ? nextStop.location.name : null;
-
     const update = () => {
+        const nextStop = state.multiStop.stops[state.multiStop.currentIndex + 1];
+        const nextName = nextStop ? nextStop.location.name : null;
+        const note = nextName
+            ? `Switching to ${nextName}...`
+            : msAddStopIsOpen()
+                ? 'Paused while you add a stop'
+                : 'Finishing your trip — tap ➕ Add Next Stop to keep going';
         banner.innerHTML = `
             <div>You have arrived!</div>
             <div style="font-size:18px; margin:4px 0;">${seconds}s</div>
-            ${nextName ? `<div style="font-size:11px; opacity:0.8;">Switching to ${nextName}...</div>` : ''}
+            <div style="font-size:11px; opacity:0.8;">${note}</div>
             <button onclick="msCancelCountdown()" style="
                 margin-top:6px;
                 background:rgba(255,255,255,0.2);
@@ -7439,11 +7589,14 @@ function msStartCountdown() {
                 cursor:pointer;
             ">Cancel</button>
         `;
+        msSyncArrivedButton();   // a stop added during the countdown → button appears
     };
 
     update();
 
     state.multiStop.countdownTimer = setInterval(() => {
+        // Don't end the trip while the user is busy picking another stop.
+        if (!msHasNextStop() && msAddStopIsOpen()) { update(); return; }
         seconds--;
         if (seconds <= 0) {
             clearInterval(state.multiStop.countdownTimer);
@@ -7462,7 +7615,11 @@ function msCancelCountdown() {
         state.multiStop.countdownTimer = null;
     }
     document.getElementById('msCountdownBanner').style.display = 'none';
-    showNotification('Auto-switch cancelled — tap Arrived when ready', 'info');
+    // Last stop: the trip stays open, so a stop can still be added later.
+    showNotification(msHasNextStop()
+        ? 'Auto-switch cancelled — tap Arrived when ready'
+        : "Trip kept open — add another stop, or tap End Navigation when you're done", 'info');
+    msSyncArrivedButton();
 }
 
 async function msArrived() {
@@ -7490,6 +7647,7 @@ async function msArrived() {
     ms.active = true;
 
     msRenderProgress();
+    msSyncArrivedButton();
     showNotification(`🧭 Navigating to ${nextStop.location.name}`, 'info');
 
     // Check if online or offline
@@ -9248,6 +9406,8 @@ function sync3DUserLocationMarker(lat, lng) {
     if (typeof state.deadReckoning?.heading === 'number') {
         applyUserMarkerHeading(state.deadReckoning.heading);
     }
+
+
 }
 
 // ✅ ADD — mirrors removeUserLocationMarker()'s 2D cleanup so a stale dot
