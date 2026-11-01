@@ -4470,3 +4470,10 @@ html {
     font-weight: 700;
     color: #1e5b7a;
 }
+
+/* Building details window sits above the floating buttons
+   (AI chat 💬 and the ☰ menu, both z-index 2000), so they go
+   behind its dark backdrop instead of covering the room list. */
+#locationModal {
+    z-index: 2100;
+}
